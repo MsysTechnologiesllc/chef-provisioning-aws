@@ -20,7 +20,6 @@ require 'chef/provisioning/aws_driver/credentials2'
 require 'chef/provisioning/aws_driver/aws_tagger'
 
 require 'yaml'
-# require 'aws-sdk-v1'
 require 'aws-sdk'
 require 'retryable'
 require 'ubuntu_ami'
@@ -203,7 +202,7 @@ module AWSDriver
 
         action_handler.perform_action updates do
           # IAM says the server certificate exists, but ELB throws this error
-          Chef::Provisioning::AWSDriver::AWSProvider.retry_with_backoff(AWS::ELB::Errors::CertificateNotFound) do
+          Chef::Provisioning::AWSDriver::AWSProvider.retry_with_backoff(Aws::ELB::Errors::CertificateNotFound) do
             actual_elb = elb.load_balancers.create(lb_spec.name, lb_options)
           end
 
@@ -299,7 +298,7 @@ module AWSDriver
                   load_balancer_name: actual_elb.name,
                   subnets: attach_subnets
                 )
-              rescue AWS::ELB::Errors::InvalidConfigurationRequest => e
+              rescue Aws::ELB::Errors::InvalidConfigurationRequest => e
                 Chef::Log.error "You cannot currently move from 1 subnet to another in the same availability zone. " +
                     "Amazon does not have an atomic operation which allows this.  You must create a new " +
                     "ELB with the correct subnets and move instances into it.  Tried to attach subets " +
@@ -764,12 +763,12 @@ EOD
 
     def cloudsearch(api_version="20130101")
       @cloudsearch ||= {}
-      @cloudsearch[api_version] ||= AWS::CloudSearch::Client.const_get("V#{api_version}").new
+      @cloudsearch[api_version] ||= Aws::CloudSearch::Client.const_get("V#{api_version}").new
       @cloudsearch[api_version]
     end
 
     def ec2
-      @ec2 ||= AWS::EC2.new(config: aws_config)
+      @ec2 ||= Aws::EC2.new(config: aws_config)
     end
 
     AWS_V2_SERVICES.each do |load_name, short_name|
@@ -787,35 +786,35 @@ EOD
     end
 
     def elb
-      @elb ||= AWS::ELB.new(config: aws_config)
+      @elb ||= Aws::ELB.new(config: aws_config)
     end
 
     def elasticache
-      @elasticache ||= AWS::ElastiCache::Client.new(config: aws_config)
+      @elasticache ||= Aws::ElastiCache::Client.new(config: aws_config)
     end
 
     def iam
-      @iam ||= AWS::IAM.new(config: aws_config)
+      @iam ||= Aws::IAM.new(config: aws_config)
     end
 
     def rds
-      @rds ||= AWS::RDS.new(config: aws_config)
+      @rds ||= Aws::RDS.new(config: aws_config)
     end
 
     def s3
-      @s3 ||= AWS::S3.new(config: aws_config)
+      @s3 ||= Aws::S3.new(config: aws_config)
     end
 
     def sns
-      @sns ||= AWS::SNS.new(config: aws_config)
+      @sns ||= Aws::SNS.new(config: aws_config)
     end
 
     def sqs
-      @sqs ||= AWS::SQS.new(config: aws_config)
+      @sqs ||= Aws::SQS.new(config: aws_config)
     end
 
     def auto_scaling
-      @auto_scaling ||= AWS::AutoScaling.new(config: aws_config)
+      @auto_scaling ||= Aws::AutoScaling.new(config: aws_config)
     end
 
     def build_arn(partition: 'aws', service: nil, region: aws_config.region, account_id: self.account_id, resource: nil)
@@ -838,7 +837,7 @@ EOD
         # We've got an AWS account root credential or an IAM admin with access rights
         current_user = iam.client.get_user
         arn = current_user[:user][:arn]
-      rescue AWS::IAM::Errors::AccessDenied => e
+      rescue Aws::IAM::Errors::AccessDenied => e
         # If we don't have access, the error message still tells us our account ID and user ...
         # https://forums.aws.amazon.com/thread.jspa?messageID=394344
         if e.to_s !~ /\b(arn:aws:iam::[0-9]{12}:\S*)/
