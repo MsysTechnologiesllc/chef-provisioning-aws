@@ -115,7 +115,7 @@ module AWSDriver
         access_key_id:     credentials[:aws_access_key_id],
         secret_access_key: credentials[:aws_secret_access_key],
         region: region || credentials[:region],
-        proxy_uri: credentials[:proxy_uri] || nil,
+        http_proxy: credentials[:proxy_uri] || nil,
         session_token: credentials[:aws_session_token] || nil,
         logger: Chef::Log.logger
       )
@@ -160,12 +160,22 @@ module AWSDriver
     end
 
     def deep_symbolize_keys(hash_like)
+      # Process arrays first...
+      if hash_like.is_a?(Array)
+        hash_like.length.times do |e|
+          hash_like[e]=deep_symbolize_keys(hash_like[e]) if hash_like[e].respond_to?(:values) or hash_like[e].is_a?(Array)
+        end
+        return hash_like
+      end
+      # Otherwise return ourselves if not a hash
+      return hash_like if not hash_like.respond_to?(:values)
+      # Otherwise we are hash like, push on through...
       if hash_like.nil? || hash_like.empty?
         return {}
       end
       r = {}
       hash_like.each do |key, value|
-        value = deep_symbolize_keys(value) if value.respond_to?(:values)
+        value = deep_symbolize_keys(value) if value.respond_to?(:values) or value.is_a?(Array)
         r[key.to_sym] = value
       end
       r
@@ -187,7 +197,7 @@ module AWSDriver
       if !actual_elb || !actual_elb.exists?
         lb_options[:listeners] ||= get_listeners(:http)
         if !lb_options[:subnets] && !lb_options[:availability_zones] && machine_specs
-          lb_options[:subnets] = machine_specs.map { |s| ec2.instances[s.reference['instance_id']].subnet }.uniq
+          lb_options[:subnets] = machine_specs.map { |s| ec2_resource.instances[s.reference['instance_id']].subnet }.uniq
         end
 
         perform_action = proc { |desc, &block| action_handler.perform_action(desc, &block) }
@@ -269,7 +279,7 @@ module AWSDriver
                 {:name => 'availabilityZone', :values => [zone]},
                 {:name => 'defaultForAz', :values => ['true']}
               ]
-              default_subnet = ec2.client.describe_subnets(:filters => filters)[:subnet_set]
+              default_subnet = ec2_client.describe_subnets(:filters => filters)[:subnet_set]
               if default_subnet.size != 1
                 raise "Could not find default subnet in availability zone #{zone}"
               end
@@ -278,7 +288,7 @@ module AWSDriver
             end
           end
           unless lb_options[:subnets].nil? || lb_options[:subnets].empty?
-            subnet_query = ec2.client.describe_subnets(:subnet_ids => lb_options[:subnets])[:subnet_set]
+            subnet_query = ec2_client.describe_subnets(:subnet_ids => lb_options[:subnets])[:subnet_set]
             # AWS raises an error on an unknown subnet, but not an unknown AZ
             subnet_query.each do |subnet|
               zone = subnet[:availability_zone].downcase
@@ -949,7 +959,7 @@ EOD
       end
 
       Chef::Log.debug "AWS Bootstrap options: #{bootstrap_options.inspect}"
-      bootstrap_options
+      deep_symbolize_keys(bootstrap_options)
     end
 
     def default_ssh_username
@@ -967,9 +977,9 @@ EOD
     def keypair_for(bootstrap_options)
       if bootstrap_options[:key_name]
         keypair_name = bootstrap_options[:key_name]
-        actual_key_pair = ec2.key_pairs[keypair_name]
+        actual_key_pair = ec2_resource.key_pair(keypair_name)
         if !actual_key_pair.exists?
-          ec2.key_pairs.create(keypair_name)
+          ec2_resource.key_pairs.create(keypair_name)
         end
         actual_key_pair
       end
@@ -1275,6 +1285,7 @@ EOD
       convergence_options = Cheffish::MergedConfig.new(
         machine_options[:convergence_options] || {},
         ohai_hints: { 'ec2' => '' })
+      convergence_options=deep_symbolize_keys(convergence_options)
 
       # Defaults
       if !machine_spec.reference
