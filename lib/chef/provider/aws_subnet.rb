@@ -29,15 +29,15 @@ class Chef::Provider::AwsSubnet < Chef::Provisioning::AWSDriver::AWSProvider
     if !cidr_block
       cidr_block = Chef::Resource::AwsVpc.get_aws_object(new_resource.vpc, resource: new_resource).cidr_block
     end
-    options = { :vpc => new_resource.vpc }
+    options = { :vpc_id => new_resource.vpc, :cidr_block => cidr_block }
     options[:availability_zone] = new_resource.availability_zone if new_resource.availability_zone
     options = Chef::Provisioning::AWSDriver::AWSResource.lookup_options(options, resource: new_resource)
 
-    converge_by "create subnet #{new_resource.name} with CIDR #{cidr_block} in VPC #{new_resource.vpc} (#{options[:vpc]}) in #{region}" do
-      subnet = new_resource.driver.ec2.subnets.create(cidr_block, options)
-      retry_with_backoff(::Aws::EC2::Errors::InvalidSubnetID::NotFound) do
-        subnet.tags['Name'] = new_resource.name
-        subnet.tags['VPC'] = new_resource.vpc
+    converge_by "create subnet #{new_resource.name} with CIDR #{cidr_block} in VPC #{new_resource.vpc} (#{options[:vpc_id]}) in #{region}" do
+      subnet = new_resource.driver.ec2_resource.create_subnet(options)
+      retry_with_backoff(::Aws::EC2::Errors::InvalidSubnetIDNotFound) do
+        new_resource.driver.ec2_resource.create_tags(resources: [subnet.id],tags: [{key: "Name", value: new_resource.name}])
+        new_resource.driver.ec2_resource.create_tags(resources: [subnet.id],tags: [{key: "VPC", value: new_resource.vpc}])
       end
       subnet
     end
@@ -49,7 +49,7 @@ class Chef::Provider::AwsSubnet < Chef::Provisioning::AWSDriver::AWSProvider
       raise "cidr_block for subnet #{new_resource.name} is #{new_resource.cidr_block}, but existing subnet (#{subnet.id})'s cidr_block is #{subnet.cidr_block}.  Modification of subnet cidr_block is unsupported!"
     end
     vpc = Chef::Resource::AwsVpc.get_aws_object(new_resource.vpc, resource: new_resource)
-    if vpc && subnet.vpc != vpc
+    if vpc && subnet.vpc.id != vpc.id
       raise "VPC for subnet #{new_resource.name} is #{new_resource.vpc} (#{vpc.id}), but existing subnet (#{subnet.id})'s vpc is #{subnet.vpc.id}.  Modification of subnet VPC is unsupported!"
     end
     if new_resource.availability_zone && subnet.availability_zone_name != new_resource.availability_zone
@@ -91,7 +91,7 @@ class Chef::Provider::AwsSubnet < Chef::Provisioning::AWSDriver::AWSProvider
       # If the subnet doesn't exist we can't check state on it - state can only be :pending or :available
       begin
         subnet.delete
-      rescue ::Aws::EC2::Errors::InvalidSubnetID::NotFound
+      rescue ::Aws::EC2::Errors::InvalidSubnetIDNotFound
       end
     end
   end

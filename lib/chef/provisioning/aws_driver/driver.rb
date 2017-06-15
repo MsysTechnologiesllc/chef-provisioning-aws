@@ -115,7 +115,7 @@ module AWSDriver
         access_key_id:     credentials[:aws_access_key_id],
         secret_access_key: credentials[:aws_secret_access_key],
         region: region || credentials[:region],
-        proxy_uri: credentials[:proxy_uri] || nil,
+        http_proxy: credentials[:proxy_uri] || nil,
         session_token: credentials[:aws_session_token] || nil,
         logger: Chef::Log.logger
       )
@@ -160,12 +160,22 @@ module AWSDriver
     end
 
     def deep_symbolize_keys(hash_like)
+      # Process arrays first...
+      if hash_like.is_a?(Array)
+        hash_like.length.times do |e|
+          hash_like[e]=deep_symbolize_keys(hash_like[e]) if hash_like[e].respond_to?(:values) or hash_like[e].is_a?(Array)
+        end
+        return hash_like
+      end
+      # Otherwise return ourselves if not a hash
+      return hash_like if not hash_like.respond_to?(:values)
+      # Otherwise we are hash like, push on through...
       if hash_like.nil? || hash_like.empty?
         return {}
       end
       r = {}
       hash_like.each do |key, value|
-        value = deep_symbolize_keys(value) if value.respond_to?(:values)
+        value = deep_symbolize_keys(value) if value.respond_to?(:values) or value.is_a?(Array)
         r[key.to_sym] = value
       end
       r
@@ -184,16 +194,16 @@ module AWSDriver
 
       old_elb = nil
       actual_elb = load_balancer_for(lb_spec)
-      if !actual_elb || !actual_elb.exists?
+      if !actual_elb
         lb_options[:listeners] ||= get_listeners(:http)
         if !lb_options[:subnets] && !lb_options[:availability_zones] && machine_specs
-          lb_options[:subnets] = machine_specs.map { |s| ec2.instances[s.reference['instance_id']].subnet }.uniq
+          lb_options[:subnets] = machine_specs.map { |s| ec2_resource.instances[s.reference['instance_id']].subnet }.uniq
         end
 
         perform_action = proc { |desc, &block| action_handler.perform_action(desc, &block) }
         Chef::Log.debug "AWS Load Balancer options: #{lb_options.inspect}"
 
-        updates = [ "create load balancer #{lb_spec.name} in #{aws_config.region}" ]
+        updates = [ "create load balancer #{lb_spec.name} in #{aws_config[:region]}" ]
         updates << "  enable availability zones #{lb_options[:availability_zones]}" if lb_options[:availability_zones]
         updates << "  attach subnets #{lb_options[:subnets].join(', ')}" if lb_options[:subnets]
         updates << "  with listeners #{lb_options[:listeners]}" if lb_options[:listeners]
@@ -202,8 +212,9 @@ module AWSDriver
 
         action_handler.perform_action updates do
           # IAM says the server certificate exists, but ELB throws this error
-          Chef::Provisioning::AWSDriver::AWSProvider.retry_with_backoff(::Aws::ELB::Errors::CertificateNotFound) do
-            actual_elb = elb.load_balancers.create(lb_spec.name, lb_options)
+          Chef::Provisioning::AWSDriver::AWSProvider.retry_with_backoff(::Aws::ElasticLoadBalancing::Errors::CertificateNotFound) do
+            lb_options[:load_balancer_name]=lb_spec.name
+            actual_elb = elb.create_load_balancer(lb_options)
           end
 
           lb_spec.reference = {
@@ -216,7 +227,7 @@ module AWSDriver
         # Header gets printed the first time we make an update
         perform_action = proc do |desc, &block|
           perform_action = proc { |desc, &block| action_handler.perform_action(desc, &block) }
-          action_handler.perform_action [ "Update load balancer #{lb_spec.name} in #{aws_config.region}", desc ].flatten, &block
+          action_handler.perform_action [ "Update load balancer #{lb_spec.name} in #{aws_config[:region]}", desc ].flatten, &block
         end
 
         # TODO: refactor this whole giant method into many smaller method calls
@@ -255,7 +266,7 @@ module AWSDriver
           # an unecessary ones
           actual_zones_subnets = {}
           actual_elb.subnets.each do |subnet|
-            actual_zones_subnets[subnet.id] = subnet.availability_zone.name
+            actual_zones_subnets[subnet] = Chef::Resource::AwsSubnet.get_aws_object(subnet, driver: self).availability_zone
           end
 
           # Only 1 of subnet or AZ will be populated b/c of our check earlier
@@ -269,7 +280,7 @@ module AWSDriver
                 {:name => 'availabilityZone', :values => [zone]},
                 {:name => 'defaultForAz', :values => ['true']}
               ]
-              default_subnet = ec2.client.describe_subnets(:filters => filters)[:subnet_set]
+              default_subnet = ec2_client.describe_subnets(:filters => filters)[:subnets]
               if default_subnet.size != 1
                 raise "Could not find default subnet in availability zone #{zone}"
               end
@@ -278,7 +289,7 @@ module AWSDriver
             end
           end
           unless lb_options[:subnets].nil? || lb_options[:subnets].empty?
-            subnet_query = ec2.client.describe_subnets(:subnet_ids => lb_options[:subnets])[:subnet_set]
+            subnet_query = ec2_client.describe_subnets(:subnet_ids => lb_options[:subnets])[:subnets]
             # AWS raises an error on an unknown subnet, but not an unknown AZ
             subnet_query.each do |subnet|
               zone = subnet[:availability_zone].downcase
@@ -298,7 +309,7 @@ module AWSDriver
                   load_balancer_name: actual_elb.name,
                   subnets: attach_subnets
                 )
-              rescue ::Aws::ELB::Errors::InvalidConfigurationRequest => e
+              rescue ::Aws::ElasticLoadBalancing::Errors::InvalidConfigurationRequest => e
                 Chef::Log.error "You cannot currently move from 1 subnet to another in the same availability zone. " +
                     "Amazon does not have an atomic operation which allows this.  You must create a new " +
                     "ELB with the correct subnets and move instances into it.  Tried to attach subets " +
@@ -326,7 +337,7 @@ module AWSDriver
         # Update listeners - THIS IS NOT ATOMIC
         if lb_options[:listeners]
           add_listeners = {}
-          lb_options[:listeners].each { |l| add_listeners[l[:port]] = l }
+          lb_options[:listeners].each { |l| add_listeners[l[:load_balancer_port]] = l }
           actual_elb.listeners.each do |listener|
             desired_listener = add_listeners.delete(listener.port)
             if desired_listener
@@ -363,7 +374,7 @@ module AWSDriver
             end
           end
           add_listeners.values.each do |listener|
-            updates = [ "  add listener #{listener[:port]}" ]
+            updates = [ "  add listener #{listener[:load_balanacer_port]}" ]
             updates << "    set protocol to #{listener[:protocol].inspect}"
             updates << "    set instance port to #{listener[:instance_port].inspect}"
             updates << "    set instance protocol to #{listener[:instance_protocol].inspect}"
@@ -471,7 +482,7 @@ module AWSDriver
         if instances_to_add.size > 0
           perform_action.call("  add machines #{instances_to_add.map { |s| s.name }.join(', ')}") do
             instance_ids_to_add = instances_to_add.map { |s| s.reference['instance_id'] }
-            Chef::Log.debug("Adding instances #{instance_ids_to_add.join(', ')} to load balancer #{actual_elb.name} in region #{aws_config.region}")
+            Chef::Log.debug("Adding instances #{instance_ids_to_add.join(', ')} to load balancer #{actual_elb.name} in region #{aws_config[:region]}")
             actual_elb.instances.add(instance_ids_to_add)
           end
         end
@@ -533,10 +544,10 @@ module AWSDriver
       return if lb_spec == nil
 
       actual_elb = load_balancer_for(lb_spec)
-      if actual_elb && actual_elb.exists?
+      if actual_elb
         # Remove ELB from AWS
         action_handler.perform_action "Deleting EC2 ELB #{lb_spec.id}" do
-          actual_elb.delete
+          elb.delete_load_balancer({load_balancer_name: actual_elb.load_balancer_name })
         end
       end
 
@@ -666,7 +677,7 @@ EOD
       bootstrap_options = bootstrap_options_for(action_handler, machine_spec, machine_options)
 
       if instance == nil || !instance.exists? || instance.state.name == "terminated"
-        action_handler.perform_action "Create #{machine_spec.name} with AMI #{bootstrap_options[:image_id]} in #{aws_config.region}" do
+        action_handler.perform_action "Create #{machine_spec.name} with AMI #{bootstrap_options[:image_id]} in #{aws_config[:region]}" do
           Chef::Log.debug "Creating instance with bootstrap options #{bootstrap_options}"
           instance = create_instance_and_reference(bootstrap_options, action_handler, machine_spec, machine_options)
         end
@@ -693,7 +704,7 @@ EOD
       if instance.state.name != "running"
         wait_until_machine(action_handler, machine_spec, "finish stopping", instance) { |instance| instance.state.name != "stopping" }
         if instance.state.name == "stopped"
-          action_handler.perform_action "Start #{machine_spec.name} (#{machine_spec.reference['instance_id']}) in #{aws_config.region} ..." do
+          action_handler.perform_action "Start #{machine_spec.name} (#{machine_spec.reference['instance_id']}) in #{aws_config[:region]} ..." do
             instance.start
           end
         end
@@ -736,7 +747,7 @@ EOD
       if instance && instance.exists?
         wait_until_machine(action_handler, machine_spec, "finish coming up so we can stop it", instance) { |instance| instance.state.name != "pending" }
         if instance.state.name == "running"
-          action_handler.perform_action "Stop #{machine_spec.name} (#{instance.id}) in #{aws_config.region} ..." do
+          action_handler.perform_action "Stop #{machine_spec.name} (#{instance.id}) in #{aws_config[:region]} ..." do
             instance.stop
           end
         end
@@ -787,7 +798,7 @@ EOD
     end
 
     def elb
-      @elb ||= ::Aws::ELB.new(config: aws_config)
+      @elb ||= ::Aws::ElasticLoadBalancing::Client.new(aws_config)
     end
 
     def elasticache
@@ -819,7 +830,7 @@ EOD
       @auto_scaling ||= ::Aws::AutoScaling.new(config: aws_config)
     end
 
-    def build_arn(partition: 'aws', service: nil, region: aws_config.region, account_id: self.account_id, resource: nil)
+    def build_arn(partition: 'aws', service: nil, region: aws_config[:region], account_id: self.account_id, resource: nil)
       "arn:#{partition}:#{service}:#{region}:#{account_id}:#{resource}"
     end
 
@@ -872,7 +883,7 @@ EOD
       # These are hardcoded for now - only 1 machine at a time
       bootstrap_options[:min_count] = bootstrap_options[:max_count] = 1
       bootstrap_options[:instance_type] ||= default_instance_type
-      image_id = machine_options[:from_image] || bootstrap_options[:image_id] || machine_options[:image_id] || default_ami_for_region(aws_config.region)
+      image_id = machine_options[:from_image] || bootstrap_options[:image_id] || machine_options[:image_id] || default_ami_for_region(aws_config[:region])
       bootstrap_options[:image_id] = image_id
       bootstrap_options.delete(:key_path)
       if !bootstrap_options[:key_name]
@@ -949,7 +960,7 @@ EOD
       end
 
       Chef::Log.debug "AWS Bootstrap options: #{bootstrap_options.inspect}"
-      bootstrap_options
+      deep_symbolize_keys(bootstrap_options)
     end
 
     def default_ssh_username
@@ -967,9 +978,9 @@ EOD
     def keypair_for(bootstrap_options)
       if bootstrap_options[:key_name]
         keypair_name = bootstrap_options[:key_name]
-        actual_key_pair = ec2.key_pairs[keypair_name]
+        actual_key_pair = ec2_resource.key_pair(keypair_name)
         if !actual_key_pair.exists?
-          ec2.key_pairs.create(keypair_name)
+          ec2_resource.key_pairs.create(keypair_name)
         end
         actual_key_pair
       end
@@ -1275,6 +1286,7 @@ EOD
       convergence_options = Cheffish::MergedConfig.new(
         machine_options[:convergence_options] || {},
         ohai_hints: { 'ec2' => '' })
+      convergence_options=deep_symbolize_keys(convergence_options)
 
       # Defaults
       if !machine_spec.reference
@@ -1471,7 +1483,7 @@ EOD
     def converge_elb_tags(aws_object, tags, action_handler)
       elb_strategy = Chef::Provisioning::AWSDriver::TaggingStrategy::ELB.new(
         elb_client,
-        aws_object.name,
+        aws_object,
         tags
       )
       aws_tagger = Chef::Provisioning::AWSDriver::AWSTagger.new(elb_strategy, action_handler)
@@ -1537,7 +1549,7 @@ EOD
           from.delete(:instance_port)
           from.delete(:instance_protocol)
           to = get_listener(to)
-          to.delete(:port)
+          to.delete(:load_balancer_port)
           to.delete(:protocol)
           to.merge(from)
         end
@@ -1557,21 +1569,21 @@ EOD
       when Hash
         result.merge!(listener)
       when Array
-        result[:port] = listener[0] if listener.size >= 1
+        result[:load_balancer_port] = listener[0] if listener.size >= 1
         result[:protocol] = listener[1] if listener.size >= 2
       when Symbol,String
         result[:protocol] = listener
       when Integer
-        result[:port] = listener
+        result[:load_balancer_port] = listener
       else
         raise "Invalid listener #{listener}"
       end
 
       # If either port or protocol are set, set the other
-      if result[:port] && !result[:protocol]
-        result[:protocol] = PROTOCOL_DEFAULTS[result[:port]]
-      elsif result[:protocol] && !result[:port]
-        result[:port] = PORT_DEFAULTS[result[:protocol]]
+      if result[:load_balancer_port] && !result[:protocol]
+        result[:protocol] = PROTOCOL_DEFAULTS[result[:load_balancer_port]]
+      elsif result[:protocol] && !result[:load_balancer_port]
+        result[:load_balancer_port] = PORT_DEFAULTS[result[:protocol]]
       end
       if result[:instance_port] && !result[:instance_protocol]
         result[:instance_protocol] = PROTOCOL_DEFAULTS[result[:instance_port]]
@@ -1580,7 +1592,7 @@ EOD
       end
 
       # If instance_port is still unset, copy port/protocol over
-      result[:instance_port] ||= result[:port]
+      result[:instance_port] ||= result[:load_balancer_port]
       result[:instance_protocol] ||= result[:protocol]
 
       result

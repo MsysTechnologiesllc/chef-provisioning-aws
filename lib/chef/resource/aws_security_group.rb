@@ -55,21 +55,21 @@ class Chef::Resource::AwsSecurityGroup < Chef::Provisioning::AWSDriver::AWSResou
 
   def aws_object
     if security_group_id
-      result = driver.ec2.security_groups[security_group_id]
+      result = driver.ec2_resource.security_group(security_group_id)
     else
       # Names are unique within a VPC.  Try to search by name and narroy by VPC, if
       # provided
       if vpc
         vpc_object = Chef::Resource::AwsVpc.get_aws_object(vpc, resource: self)
-        results = vpc_object.security_groups.filter('group-name', name).to_a
+        results=vpc_object.security_groups.to_a.select { |s| s.group_name == name or s.id == name }
       else
-        results = driver.ec2.security_groups.filter('group-name', name).to_a
+        results=driver.ec2_resource.security_groups.to_a.select { |s| s.group_name == name or s.id == name }
       end
       if results.size >= 2
         raise ::Chef::Provisioning::AWSDriver::Exceptions::MultipleSecurityGroupError.new(name, results)
       end
       result = results.first
     end
-    result && result.exists? ? result : nil
+    result ? result : nil
   end
 end

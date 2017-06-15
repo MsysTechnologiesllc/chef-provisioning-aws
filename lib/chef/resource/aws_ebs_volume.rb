@@ -25,7 +25,13 @@ class Chef::Resource::AwsEbsVolume < Chef::Provisioning::AWSDriver::AWSResourceW
 
   def aws_object
     driver, id = get_driver_and_id
-    result = driver.ec2.volumes[id] if id
-    result && result.exists? && ![:deleted, :deleting].include?(result.status) ? result : nil
+    result = driver.ec2_resource.volume(id) if id
+    result && exists?(result) && ![:deleted, :deleting].include?(result.state) ? result : nil
+  end
+  
+  def exists?(result)
+    return true if result.data
+  rescue ::Aws::EC2::Errors::InvalidVolumeIDNotFound
+    return false
   end
 end
