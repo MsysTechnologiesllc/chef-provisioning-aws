@@ -24,7 +24,7 @@ module AWSSupport
           return match_sets_failure_messages(expected, actual, identifier)
         elsif Hash === expected
           return match_hashes_failure_messages(expected, actual, identifier) if Hash === actual
-          return match_hash_and_object_failure_messages(expected, actual, identifier) if MatchableObject === actual
+          return match_hash_and_object_failure_messages(expected, actual.data, identifier) if MatchableObject === actual
         elsif Array === expected
           return match_arrays_failure_messages(expected, actual, identifier) if MatchableArray === actual
         end
@@ -130,7 +130,11 @@ module AWSSupport
 
           # Grab the actual value from the object
           begin
-            actual_value = actual_object.send(expected_key)
+            if expected_key.to_s == "dhcp_configurations"
+              actual_value = actual_object.to_h[expected_key]
+            else
+              actual_value = actual_object.send(expected_key)
+            end
           rescue NoMethodError
             if !actual_value.respond_to?(expected_key)
               result << "#{identifier || "object"}.send(#{expected_key.inspect}) is missing, expected value #{description_of(expected_value)}"
