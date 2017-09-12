@@ -12,7 +12,11 @@ class Chef::Resource::AwsElasticsearchDomain < Chef::Provisioning::AWSDriver::AW
 
   aws_sdk_type ::Aws::CloudSearchDomain
 
+  # ElasticSearch Domain Name
   attribute :domain_name, kind_of: String, name_attribute: true
+
+  # ElasticSearch Version
+  attribute :elasticsearch_version, kind_of: String
 
   # Cluster Config
   attribute :instance_type, kind_of: String

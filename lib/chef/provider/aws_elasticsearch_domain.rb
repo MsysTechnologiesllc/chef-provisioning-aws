@@ -1,5 +1,6 @@
 require 'chef/provisioning/aws_driver/aws_provider'
 require 'chef/provisioning/aws_driver/tagging_strategy/elasticsearch'
+require 'pry'
 
 class Chef::Provider::AwsElasticsearchDomain < Chef::Provisioning::AWSDriver::AWSProvider
   provides :aws_elasticsearch_domain
@@ -53,6 +54,7 @@ class Chef::Provider::AwsElasticsearchDomain < Chef::Provisioning::AWSDriver::AW
 
   def update_payload
     payload = {domain_name: new_resource.domain_name}
+    payload.merge!(elasticsearch_version: new_resource.elasticsearch_version) if elasticsearch_version_present?
     payload.merge!(ebs_options) if ebs_options_present?
     payload.merge!(cluster_options) if cluster_options_present?
     payload.merge!(snapshot_options) if snapshot_options_present?
@@ -66,6 +68,10 @@ class Chef::Provider::AwsElasticsearchDomain < Chef::Provisioning::AWSDriver::AW
       new_resource.send(i).nil? ? accum : accum.merge({i => new_resource.send(i)})
     end
     {ebs_options: opts}
+  end
+
+  def elasticsearch_version_present?
+    !new_resource.elasticsearch_version.nil?  
   end
 
   def ebs_options_present?
